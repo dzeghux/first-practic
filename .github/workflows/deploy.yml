@@ -17,75 +17,83 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create .env file from secrets
-        shell: bash # Принудительно используем bash для поддержки синтаксиса << EOF
+        # Используем встроенный PowerShell (работает на Windows по умолчанию)
         run: |
           echo "Creating .env file from GitHub Secrets..."
-          cat > .env << EOF
-          # Database configuration
+          $envContent = @"
           DB_HOST=${{ secrets.DB_HOST }}
           DB_PORT=${{ secrets.DB_PORT }}
           DB_NAME=${{ secrets.DB_NAME }}
           DB_USER=${{ secrets.DB_USER }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-          # Application configuration
           APP_PORT=${{ secrets.APP_PORT }}
           APP_SECRET=${{ secrets.APP_SECRET }}
           API_KEY=${{ secrets.API_KEY }}
-          # Docker configuration
           COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
-          EOF
+          "@
+          Set-Content -Path .env -Value $envContent
           echo ".env file created successfully"
           echo "Contents (masked):"
-          cat .env | sed 's/=.*/=***/'
+          Get-Content .env | ForEach-Object { $_ -replace '=.*', '=***' }
 
       - name: Deploy with Docker Compose
         run: |
           echo "Starting application stack..."
           docker-compose up -d 
           echo "Waiting for services to start..."
-          sleep 30
+          Start-Sleep -Seconds 30
 
       - name: Verify containers are running
         run: |
           docker-compose ps
-          # Проверка, что контейнеры запущены
-          if docker-compose ps | grep -q "Up"; then
+          # Проверка, что контейнеры запущены (ищем статус Up)
+          $psOutput = docker-compose ps
+          if ($psOutput -match "Up") {
             echo "✓ All containers are running"
-          else
+          } else {
             echo "✗ Some containers failed to start"
             docker-compose logs
             exit 1
-          fi
+          }
 
       - name: Run application tests
         run: |
           echo "✓ Running application tests..."
           echo "1. Testing application and database connectivity..."
           
-          # Проверяем healthcheck приложения (убедитесь, что эндпоинт /health существует)
-          if curl -f http://localhost:${{ secrets.APP_PORT }}/health; then
+          # Проверяем healthcheck приложения
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost:${{ secrets.APP_PORT }}/health" -UseBasicParsing -ErrorAction Stop
             echo "✓ Web application is healthy"
-          else
+          } catch {
             echo "✗ Web application health check failed"
             exit 1
-          fi
+          }
 
           echo "2. Testing data consistency..."
           # Получаем данные из БД (предполагается, что сервис БД в docker-compose называется 'db')
-          DB_COUNT=$(docker-compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" | tr -d ' ' || echo "0")
+          $dbCountStr = docker-compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;"
+          # Очищаем вывод от пробелов и возможных переносов строк
+          $dbCount = $dbCountStr.Trim()
           
-          # Получаем данные через API (убедитесь, что эндпоинт /api/items/count существует)
-          WEB_COUNT=$(curl -s http://localhost:${{ secrets.APP_PORT }}/api/items/count)
+          # Получаем данные через API
+          try {
+            $webCountResponse = Invoke-RestMethod -Uri "http://localhost:${{ secrets.APP_PORT }}/api/items/count" -Method Get -ErrorAction Stop
+            $webCount = $webCountResponse.ToString().Trim()
+          } catch {
+            echo "✗ Failed to get web API count"
+            exit 1
+          }
           
-          echo "Database count: $DB_COUNT"
-          echo "Web API count: $WEB_COUNT"
+          echo "Database count: $dbCount"
+          echo "Web API count: $webCount"
           
-          if [ "$DB_COUNT" = "$WEB_COUNT" ]; then
+          if ($dbCount -eq $webCount) {
             echo "✓ Data consistency test passed"
-          else
+          } else {
             echo "✗ Data consistency test failed"
             exit 1
-          fi
+          }
 
       - name: Upload artifacts
         if: always() # Сохраняем артефакты, даже если предыдущие тесты упали
