@@ -1,0 +1,46 @@
+name: Full Stack Application Deployment Test
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  COMPOSE_PROJECT_NAME: myapp
+
+jobs:
+  deploy-and-test:
+    runs-on: self-hosted  # Критерий 1: используем ваш локальный раннер
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file from secrets
+        run: |
+          echo "Creating .env file..."
+          # Внимание: В PowerShell перенаправление работает иначе, 
+          # для GitHub Actions (даже на Windows) используется bash-синтаксис
+          cat > .env << EOF
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          APP_PORT=${{ secrets.APP_PORT }}
+          APP_SECRET=${{ secrets.APP_SECRET }}
+          API_KEY=${{ secrets.API_KEY }}
+          COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
+          EOF
+          echo "Masked .env content:"
+          cat .env | sed 's/=.*/=***/'
+
+      - name: Deploy with Docker Compose
+        run: |
+          docker-compose up -d
+          sleep 10 # Дадим время на запуск
+
+      - name: Run tests
+        run: |
+          # ... (здесь должны быть ваши тесты из задания)
+          echo "Running tests..."
