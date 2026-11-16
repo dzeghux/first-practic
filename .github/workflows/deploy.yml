@@ -10,37 +10,87 @@ env:
 
 jobs:
   deploy-and-test:
-    runs-on: self-hosted  # Критерий 1: используем ваш локальный раннер
+    runs-on: self-hosted  # Использует ваш локальный раннер
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Create .env file from secrets
+        shell: bash # Принудительно используем bash для поддержки синтаксиса << EOF
         run: |
-          echo "Creating .env file..."
-          # Внимание: В PowerShell перенаправление работает иначе, 
-          # для GitHub Actions (даже на Windows) используется bash-синтаксис
+          echo "Creating .env file from GitHub Secrets..."
           cat > .env << EOF
+          # Database configuration
           DB_HOST=${{ secrets.DB_HOST }}
           DB_PORT=${{ secrets.DB_PORT }}
           DB_NAME=${{ secrets.DB_NAME }}
           DB_USER=${{ secrets.DB_USER }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          # Application configuration
           APP_PORT=${{ secrets.APP_PORT }}
           APP_SECRET=${{ secrets.APP_SECRET }}
           API_KEY=${{ secrets.API_KEY }}
+          # Docker configuration
           COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
           EOF
-          echo "Masked .env content:"
+          echo ".env file created successfully"
+          echo "Contents (masked):"
           cat .env | sed 's/=.*/=***/'
 
       - name: Deploy with Docker Compose
         run: |
-          docker-compose up -d
-          sleep 10 # Дадим время на запуск
+          echo "Starting application stack..."
+          docker-compose up -d 
+          echo "Waiting for services to start..."
+          sleep 30
 
-      - name: Run tests
+      - name: Verify containers are running
         run: |
-          # ... (здесь должны быть ваши тесты из задания)
-          echo "Running tests..."
+          docker-compose ps
+          # Проверка, что контейнеры запущены
+          if docker-compose ps | grep -q "Up"; then
+            echo "✓ All containers are running"
+          else
+            echo "✗ Some containers failed to start"
+            docker-compose logs
+            exit 1
+          fi
+
+      - name: Run application tests
+        run: |
+          echo "✓ Running application tests..."
+          echo "1. Testing application and database connectivity..."
+          
+          # Проверяем healthcheck приложения (убедитесь, что эндпоинт /health существует)
+          if curl -f http://localhost:${{ secrets.APP_PORT }}/health; then
+            echo "✓ Web application is healthy"
+          else
+            echo "✗ Web application health check failed"
+            exit 1
+          fi
+
+          echo "2. Testing data consistency..."
+          # Получаем данные из БД (предполагается, что сервис БД в docker-compose называется 'db')
+          DB_COUNT=$(docker-compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" | tr -d ' ' || echo "0")
+          
+          # Получаем данные через API (убедитесь, что эндпоинт /api/items/count существует)
+          WEB_COUNT=$(curl -s http://localhost:${{ secrets.APP_PORT }}/api/items/count)
+          
+          echo "Database count: $DB_COUNT"
+          echo "Web API count: $WEB_COUNT"
+          
+          if [ "$DB_COUNT" = "$WEB_COUNT" ]; then
+            echo "✓ Data consistency test passed"
+          else
+            echo "✗ Data consistency test failed"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        if: always() # Сохраняем артефакты, даже если предыдущие тесты упали
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-logs-and-env
+          path: .env
+          retention-days: 7
